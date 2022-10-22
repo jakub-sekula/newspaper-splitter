@@ -1,5 +1,5 @@
 # MAX = 500*1024*1024    # 500Mb    - max chapter size
-MAX = 2 * 1024 * 1024
+MAX = 1 * 1024 * 1024
 BUF = 50 * 1024 * 1024 * 1024  # 50GB     - memory buffer size
 
 import os
@@ -55,7 +55,18 @@ def zipfiles(directory, outputZIP="attachment.zip"):
     print("All files zipped successfully!")
 
 
+def zipfile(file, outputZIP="attachment.zip"):
+    # path to folder which needs to be zipped
+    # directory = './outbox'
+
+    # calling function to get all file paths in the directory
+    with ZipFile(outputZIP, "w") as zip:
+        # writing each file one by one
+        zip.write(file)
+
+    print("All files zipped successfully!")
+
 if __name__ == "__main__":
-    outputZIP = f'{os.path.splitext(os.listdir("./gazetka")[1])[0]}.zip'
+    outputZIP = 'Gazeta Wyborcza 20221022Szczecin.mobi.zip'
     zipfiles("./gazetka", outputZIP)
     file_split(outputZIP, MAX)

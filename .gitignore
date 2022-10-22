@@ -133,3 +133,6 @@ dmypy.json
 *.jpg
 *.mobi
 *.epub
+
+zips/
+.DS_Store

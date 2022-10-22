@@ -3,6 +3,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
+from email.mime.base import MIMEBase
+from email import encoders
 from dotenv import load_dotenv
 import os
 
@@ -10,29 +12,39 @@ load_dotenv()
 
 # this is easy as piss lol
 
-sender = os.getenv("SMTP_USER")
-receiver = "seklerek@gmail.com"
 
-message = MIMEMultipart()
+def send_mail(file):
 
-abc = 'BLACK TITLE'
-msg_content = '<h2>{title} <font color="green">TITLE HERE</font></h2>'.format(title=abc)
-p1 = '<p>new line (paragraph 1)</p>'
-p2 = '<p>Image below soon hopefully...</p>'
-message.attach(MIMEText((msg_content+p1+p2), 'html'))
+    sender = os.getenv("SMTP_USER")
+    receiver = os.getenv("SMTP_USER")
 
-with open('image.png', 'rb') as image_file:
-    message.attach(MIMEImage(image_file.read()))
+    message = MIMEMultipart()
 
+    message["From"] = sender
+    message["To"] = receiver
+    message["Subject"] = file
 
-message['From'] = sender
-message['To'] = receiver
-message['Subject'] = 'Python Test E-mail'
-msg_full = message.as_string()
+    abc = "BLACK TITLE"
+    msg_content = f'<h2>{abc} <font color="green">TITLE HERE</font></h2>'
+    p1 = "<p>new line (paragraph 1)</p>"
+    p2 = "<p>Image below soon hopefully...</p>"
+    message.attach(MIMEText((msg_content + p1 + p2), "html"))
 
-# Setup SMTP server and send message
-server = smtplib.SMTP(os.getenv("SMTP_HOST"), os.getenv("SMTP_PORT"))
-server.starttls()
-server.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASSWORD"))
-server.sendmail(sender,[receiver],msg_full)
-server.quit()
+    with open(file, "rb") as attachment:
+        obj = MIMEBase("application", "octet-stream")
+        obj.set_payload((attachment).read())
+        encoders.encode_base64(obj)
+        obj.add_header(
+            "Content-Disposition",
+            f"attachment; filename={file}",
+        )
+        message.attach(obj)
+
+    msg_full = message.as_string()
+
+    # Setup SMTP server and send message
+    server = smtplib.SMTP(os.getenv("SMTP_HOST"), os.getenv("SMTP_PORT"))
+    server.starttls()
+    server.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASSWORD"))
+    server.sendmail(sender, [receiver], msg_full)
+    server.quit()
