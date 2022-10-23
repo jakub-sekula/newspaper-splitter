@@ -211,7 +211,7 @@ def webhook():
                     ).start()
 
     logging.info("Sending response to webhook!")
-    return Response(status=201)
+    return Response(status=200)
 
 
 if __name__ == "__main__":
