@@ -15,6 +15,8 @@ from mailer import send_mail
 import threading
 import logging
 import sys
+from hashlib import sha256
+import hmac
 
 logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] %(message)s",
@@ -63,7 +65,7 @@ except Exception as e:
 
 def validate_access_token():
     global ACCESS_TOKEN
-    logging.info("Validating access token...")
+    logging.debug("Validating access token...")
     try:
         c.execute(f"SELECT * FROM access_tokens")
         results = c.fetchall()
@@ -102,7 +104,7 @@ def validate_access_token():
             logging.info(f"Updated token {resp['token'][-10:-1]} has been added to database")
             return
 
-        logging.info(f"Token {ACCESS_TOKEN[-10:-1]} validated - not expired.")
+        logging.debug(f"Token {ACCESS_TOKEN[-10:-1]} validated - not expired.")
         return
 
     except Exception as e:
@@ -165,11 +167,6 @@ app = Flask(__name__)
 logging.info("App initialised successfully!")
 
 
-@app.route("/")
-def index():
-    return (Response(status = 404))
-
-
 @app.route("/webhook", methods=["GET"])
 def verify():
     logging.info("Webhook verification request received!")
@@ -185,8 +182,20 @@ def verify():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     logging.info(f"Webhook activated!")
-    changes = check_for_updates(folder_cursor)
 
+    try:
+        signature = request.headers.get('X-Dropbox-Signature')
+        logging.debug(f"Request signature: {signature}")
+        if not hmac.compare_digest(signature, hmac.new(bytes(os.getenv("DROPBOX_APP_SECRET"), 'utf-8'), request.data, sha256).hexdigest()):
+            logging.warn("Failed to verify Dropbox signature! Returning status 403...")
+            return Response(status=403)
+    except:
+        logging.error("Signature missing from request! Returning status 403...")
+        return Response(status=403)
+
+    logging.debug(f'Request signature {signature} successfully verified!')
+
+    changes = check_for_updates(folder_cursor)
     files_list = changes["files_list"]
 
     if len(files_list) != 0:
