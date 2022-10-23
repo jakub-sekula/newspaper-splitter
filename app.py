@@ -25,9 +25,9 @@ logging.info("Starting app newspaper-splitter...")
 
 try:
     load_dotenv()
-    logging.info('Loaded configuration from .env file')
+    logging.debug('Loaded configuration from .env file')
     ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-    logging.info(f"Access token loaded from .env: {ACCESS_TOKEN[-10:-1]}")
+    logging.debug(f"Access token loaded from .env: {ACCESS_TOKEN[-10:-1]}")
 except Exception as e:
     ACCESS_TOKEN = ""
     logging.error('Could not load configuration fron .env file!')
@@ -51,12 +51,12 @@ try:
     )
     c.execute(
         """CREATE TABLE IF NOT EXISTS access_tokens (
-        key_last10 text,
-		key_requested real,
-		key_expires real
+        token_last10 text,
+		token_requested real,
+		token_expires real
 	)"""
     )
-    logging.info("Database tables set up successfully!")
+    logging.debug("Database tables set up successfully!")
 except Exception as e:
     logging.error(e)
 
@@ -90,10 +90,10 @@ def validate_access_token():
             resp = get_access_token(os.getenv("DROPBOX_REFRESH_TOKEN"))
             c.execute(
                 f"""UPDATE access_tokens
-                    SET key_last10 = '{resp['token'][-10:-1]}',
-                        key_requested = {resp['requested']},
-                        key_expires = {resp['expires']}
-                    WHERE key_last10 IS '{os.getenv("DROPBOX_ACCESS_TOKEN")[-10:-1]}'
+                    SET token_last10 = '{resp['token'][-10:-1]}',
+                        token_requested = {resp['requested']},
+                        token_expires = {resp['expires']}
+                    WHERE token_last10 IS '{os.getenv("DROPBOX_ACCESS_TOKEN")[-10:-1]}'
                 """
             )
             ACCESS_TOKEN = resp["token"]
@@ -156,16 +156,18 @@ def check_for_updates(cursor):
     conn.commit()
 
     folder_cursor = changes["cursor"]
-    logging.info(f"Updated folder cursor to {folder_cursor[-10:-1]}")
+    logging.debug(f"Updated folder cursor to {folder_cursor[-10:-1]}")
 
     return changes
 
 
 app = Flask(__name__)
+logging.info("App initialised successfully!")
+
 
 @app.route("/")
 def index():
-    return "<h1>Helllo World!</h1>"
+    return (Response(status = 404))
 
 
 @app.route("/webhook", methods=["GET"])
@@ -196,10 +198,10 @@ def webhook():
             logging.info(f"Downloading file {filename} from {path}")
             dropbox_download_file(path, f"downloads/{filename}", ACCESS_TOKEN)
 
-            logging.info(f"Zipping file {filename}...")
+            logging.debug(f"Zipping file {filename}...")
             zipfile(f"./downloads/{filename}", f"./zips/{filename}.zip")
 
-            logging.info(f"Splitting file {filename}")
+            logging.debug(f"Splitting file {filename}")
             file_split(f"./zips/{filename}.zip", "./split_zips", 1 * 1024 * 1024)
 
             for file in os.listdir("split_zips"):
@@ -213,4 +215,5 @@ def webhook():
 
 
 if __name__ == "__main__":
+    logging.warn("You should not be running the script directly! (Use gunicorn)")
     app.run(host="0.0.0.0", debug=True)
