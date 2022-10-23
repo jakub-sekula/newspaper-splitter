@@ -18,7 +18,7 @@ import sys
 
 logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] %(message)s",
-    level=logging.DEBUG,
+    level=logging.INFO,
     handlers=[logging.FileHandler("logs/app.log"), logging.StreamHandler(sys.stdout)],
 )
 logging.info("Starting app newspaper-splitter...")
@@ -78,7 +78,7 @@ def validate_access_token():
             set_key(".env", "DROPBOX_ACCESS_TOKEN", ACCESS_TOKEN)
             conn.commit()
             logging.info(
-                f"[INFO] New token {resp['token'][-10:-1]} has been added to database"
+                f"New token {resp['token'][-10:-1]} has been added to database"
             )
             return
 
