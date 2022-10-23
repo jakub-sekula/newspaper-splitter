@@ -136,3 +136,5 @@ dmypy.json
 
 # zips/
 .DS_Store
+*.db
+kek.py
