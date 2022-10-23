@@ -15,36 +15,42 @@ load_dotenv()
 
 def send_mail(file):
 
-    sender = os.getenv("SMTP_USER")
-    receiver = os.getenv("SMTP_USER")
+	sender = os.getenv("SMTP_USER")
+	receiver = os.getenv("SMTP_USER")
 
-    message = MIMEMultipart()
+	message = MIMEMultipart()
+	print("message created")
+	print("file:", file)
 
-    message["From"] = sender
-    message["To"] = receiver
-    message["Subject"] = file
+	message["From"] = sender
+	message["To"] = receiver
+	message["Subject"] = file
 
-    abc = "BLACK TITLE"
-    msg_content = f'<h2>{abc} <font color="green">TITLE HERE</font></h2>'
-    p1 = "<p>new line (paragraph 1)</p>"
-    p2 = "<p>Image below soon hopefully...</p>"
-    message.attach(MIMEText((msg_content + p1 + p2), "html"))
+	print(sender,receiver,file)
 
-    with open(file, "rb") as attachment:
-        obj = MIMEBase("application", "octet-stream")
-        obj.set_payload((attachment).read())
-        encoders.encode_base64(obj)
-        obj.add_header(
-            "Content-Disposition",
-            f"attachment; filename={file}",
-        )
-        message.attach(obj)
+	abc = "BLACK TITLE"
+	msg_content = f'<h2>{abc} <font color="green">TITLE HERE</font></h2>'
+	p1 = "<p>new line (paragraph 1)</p>"
+	p2 = "<p>Image below soon hopefully...</p>"
+	message.attach(MIMEText((msg_content + p1 + p2), "html"))
 
-    msg_full = message.as_string()
+	with open(file, "rb") as attachment:
+		obj = MIMEBase("application", "octet-stream")
+		obj.set_payload((attachment).read())
+		encoders.encode_base64(obj)
+		obj.add_header(
+			"Content-Disposition",
+			f"attachment; filename={file}",
+		)
+		message.attach(obj)
 
-    # Setup SMTP server and send message
-    server = smtplib.SMTP(os.getenv("SMTP_HOST"), os.getenv("SMTP_PORT"))
-    server.starttls()
-    server.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASSWORD"))
-    server.sendmail(sender, [receiver], msg_full)
-    server.quit()
+	msg_full = message.as_string()
+	# print(msg_full)
+
+	# Setup SMTP server and send message
+	server = smtplib.SMTP_SSL(os.getenv("SMTP_HOST"), os.getenv("SMTP_PORT"))
+	# server.starttls()
+	server.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASSWORD"))
+	server.sendmail(sender, [receiver], msg_full)
+	server.quit()
+	print('message sent!')

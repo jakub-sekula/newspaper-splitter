@@ -6,23 +6,28 @@ import os
 from zipfile import ZipFile
 
 
-def file_split(FILE, MAX):
+def file_split(file, output_directory, max_size):
     """Split file into pieces, every size is  MAX = 15*1024*1024 Byte"""
     chapters = 1
     uglybuf = ""
-    with open(FILE, "rb") as src:
+    with open(file, "rb") as src:
         while True:
-            tgt = open(f'{os.path.splitext(FILE)[0]}.z0{chapters}', "wb")
+            filename = f"{(os.path.splitext(file)[0])}.z0{chapters}".split('/')[-1]
+            print(filename)
+
+            tgt = open(f'{os.path.join(output_directory, filename)}', "wb")
+            print(f"Writing {filename}...")
             written = 0
-            while written < MAX:
+            while written < max_size:
                 if len(uglybuf) > 0:
                     tgt.write(uglybuf)
-                tgt.write(src.read(min(BUF, MAX - written)))
-                written += min(BUF, MAX - written)
+                tgt.write(src.read(min(BUF, max_size - written)))
+                written += min(BUF, max_size - written)
                 uglybuf = src.read(1)
                 if len(uglybuf) == 0:
                     break
             tgt.close()
+            print(f"Written {filename}!")
             if len(uglybuf) == 0:
                 break
             chapters += 1
@@ -66,7 +71,7 @@ def zipfile(file, outputZIP="attachment.zip"):
 
     print("All files zipped successfully!")
 
-if __name__ == "__main__":
-    outputZIP = 'Gazeta Wyborcza 20221022Szczecin.mobi.zip'
-    zipfiles("./gazetka", outputZIP)
-    file_split(outputZIP, MAX)
+# if __name__ == "__main__":
+#     outputZIP = 'Gazeta Wyborcza 20221022Szczecin.mobi.zip'
+#     zipfiles("./gazetka", outputZIP)
+#     file_split(outputZIP, MAX)
