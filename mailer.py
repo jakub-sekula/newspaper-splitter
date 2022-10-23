@@ -51,4 +51,10 @@ def send_mail(file, receiver):
 	server.quit()
 	logging.info(f'Message {filename} sent successfully!')
 
+	logging.debug(f"CWD in mailer after mail sent: {os.getcwd()}")
+	logging.debug(f"Filename in mailer after mail sent: {file}")
+
+	logging.debug(f"Deleting file {file} after sending email...")
+	os.remove(file)
+
 	return 0

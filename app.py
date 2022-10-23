@@ -18,9 +18,10 @@ import sys
 
 logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] %(message)s",
-    level=logging.INFO,
+    level=logging.DEBUG,
     handlers=[logging.FileHandler("logs/app.log"), logging.StreamHandler(sys.stdout)],
 )
+logging.info("Starting app newspaper-splitter...")
 
 try:
     load_dotenv()
@@ -207,6 +208,7 @@ def webhook():
                         target=send_mail, args=(os.path.join("split_zips", file),os.getenv("SMTP_RECEIVER"))
                     ).start()
 
+    logging.info("Sending response to webhook!")
     return Response(status=201)
 
 
