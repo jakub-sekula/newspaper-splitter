@@ -1,5 +1,6 @@
-from flask import Flask, Response, request
-from dotenv import load_dotenv
+from flask import Flask, Response, request, jsonify
+import requests
+from dotenv import load_dotenv, set_key
 from utils import (
     get_folder_cursor,
     dropbox_download_file,
@@ -24,152 +25,212 @@ logging.basicConfig(
     handlers=[logging.FileHandler("logs/app.log"), logging.StreamHandler(sys.stdout)],
 )
 
-APP_PATH = ""
-ACCESS_TOKEN = ""
-FOLDER_CURSOR = ""
+logging.info("Starting app newspaper-splitter...")
+
+APP_PATH = os.getenv("DROPBOX_FOLDER_PATH")
+AUTH_URL = f"https://www.dropbox.com/oauth2/authorize?client_id={os.getenv('DROPBOX_APP_KEY')}&token_access_type=offline&response_type=code&redirect_uri={'https://seklerek.ddns.net/authorise'}"
+folder_cursor = None
+access_token = None
+
+# Database connection and tables setup
+logging.debug("Connecting to database...")
+db = sqlite3.connect("store.db")
+with db:
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS cursors (
+        folder text,
+        cursor text,
+        timestamp real
+    )"""
+    )
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS access_tokens (
+        token_last10 text,
+        token_requested real,
+        token_expires real
+    )"""
+    )
+logging.debug("Database tables set up successfully!")
 
 # Initial setup steps
 try:
     logging.debug("Loading configuration from .env file...")
     load_dotenv()
     logging.debug("Loading access token from .env file...")
-    ACCESS_TOKEN = os.getenv("DROPBOX_ACCESS_TOKEN")
-    logging.debug(f"Access token loaded from .env: {ACCESS_TOKEN[-10:-1]}")
-    logging.debug("Loading app path from .env file...")
-    APP_PATH = os.getenv("DROPBOX_FOLDER_PATH")
-    logging.debug(f"App path loaded from .env: {APP_PATH}")
+    access_token = os.getenv("DROPBOX_ACCESS_TOKEN")
+    logging.debug(f"Access token loaded from .env: {access_token[-10:-1]}")
 except Exception as e:
     logging.error("There was an issue loading configuration from the .env file!")
 
-# Initialise app
-try:
-    logging.info("Starting app newspaper-splitter...")
-
-    # Database connection and tables setup
+# Initialise app only if refresh token is available
+if os.getenv("DROPBOX_REFRESH_TOKEN") and os.getenv("DROPBOX_ACCESS_TOKEN"):
     try:
-        logging.debug("Connecting to database...")
-        conn = sqlite3.connect("store.db")
-        c = conn.cursor()
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS cursors (
-            folder text,
-            cursor text,
-            timestamp real
-        )"""
-        )
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS access_tokens (
-            token_last10 text,
-            token_requested real,
-            token_expires real
-        )"""
-        )
-        logging.debug("Database tables set up successfully!")
-    except Exception as e:
-        logging.error(f"Error while connecting to database: {e}")
+        # Initialise access token and save it to database
+        validate_access_token(db)
 
-    # Initialise access token and save it to database
-    ACCESS_TOKEN = validate_access_token(ACCESS_TOKEN, conn, c)
+        # Retrieve Dropbox folder cursor or get a new one if missing
+        cursors_in_database = db.execute(
+            f"SELECT * FROM cursors WHERE folder='{APP_PATH}'"
+        ).fetchall()
+        logging.debug(f"Cursors in database: {cursors_in_database}")
+
+        if not cursors_in_database:
+            logging.debug("No cursors found in database! Retrieving fresh cursor...")
+            folder_cursor = get_folder_cursor(APP_PATH)["cursor"]
+            logging.debug(f"Response from get_folder_cursor: {folder_cursor}")
+            logging.debug(f"Folder cursor for {APP_PATH} is {folder_cursor}")
+            with db:
+                db.execute(
+                    f"INSERT INTO cursors VALUES (?,?,?)",
+                    (APP_PATH, folder_cursor, time.time()),
+                )
+        else:
+            folder_cursor = db.execute(
+                f"SELECT cursor FROM cursors WHERE folder IS '{APP_PATH}'"
+            ).fetchone()[0]
+
+        # If none of the above throw an exception on startup, then the app is ready to go
+        logging.info("App initialised successfully")
+
+    except Exception as e:
+        logging.critical(f"App failed to initialise. Error message: {e}")
+        raise SystemExit
+else:
+    logging.critical("Either or both tokens are missing from .env! The app will not work until reauthorised.")
+    logging.critical(f"Go to this URL to authorise:\n{AUTH_URL}")
+
+logging.info("Starting Flask app and listening for events...")
+app = Flask(__name__)
+
+
+@app.route("/webhook", methods=["GET"])
+def verify():
+    logging.info("Webhook verification request received!")
+    """Respond to the webhook verification (GET request) by echoing back the challenge parameter."""
+
+    resp = Response(request.args.get("challenge"))
+    resp.headers["Content-Type"] = "text/plain"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+
+    return resp
+
+
+@app.route("/authorise", methods=["GET"])
+def authorise():
+    logging.debug("Authorisation request received!")
+    query = request.args
+
+    logging.debug(f"Request args are: {query}")
+
+    refresh_token_response = requests.post(
+        "https://api.dropboxapi.com/oauth2/token",
+        params={
+            "code": request.args.get("code"),
+            "grant_type": "authorization_code",
+            "redirect_uri": "https://seklerek.ddns.net/authorise",
+        },
+        auth=(os.getenv("DROPBOX_APP_KEY"), os.getenv("DROPBOX_APP_SECRET")),
+    )
+
+    logging.debug(f"Response returned from refresh token request: {refresh_token_response.json()}")
+
+    logging.debug(f"Setting .env refresh token to {refresh_token_response.json()['refresh_token']}")
+    set_key(".env", "DROPBOX_REFRESH_TOKEN", refresh_token_response.json()["refresh_token"])
+
+    validate_access_token(db, refresh_token_response=refresh_token_response.json())
+
+    data = {"message": "Re-authorisation successful. You can close this tab."}
 
     # Retrieve Dropbox folder cursor or get a new one if missing
-    try:
-        c.execute(f"SELECT * FROM cursors WHERE folder='{APP_PATH}'")
-        cursors_in_database = c.fetchall()
-        if not cursors_in_database:
-            FOLDER_CURSOR = get_folder_cursor(APP_PATH, ACCESS_TOKEN)["cursor"]
-            logging.debug(f"Folder cursor for {APP_PATH} is {FOLDER_CURSOR}")
-            c.execute(
-                f"INSERT INTO cursors VALUES ('{APP_PATH}', '{FOLDER_CURSOR}',{time.time()})"
+    cursors_in_database = db.execute(
+        f"SELECT * FROM cursors WHERE folder='{APP_PATH}'"
+    ).fetchall()
+    logging.debug(f"Cursors in database: {cursors_in_database}")
+
+    if not cursors_in_database:
+        logging.debug("No cursors found in database! Retrieving fresh cursor...")
+        folder_cursor = get_folder_cursor(APP_PATH)["cursor"]
+        logging.debug(f"Response from get_folder_cursor: {folder_cursor}")
+        logging.debug(f"Folder cursor for {APP_PATH} is {folder_cursor}")
+        with db:
+            db.execute(
+                f"INSERT INTO cursors VALUES (?,?,?)",
+                (APP_PATH, folder_cursor, time.time()),
             )
-            conn.commit()
-        else:
-            c.execute(f"SELECT cursor FROM cursors WHERE folder IS '{APP_PATH}'")
-            FOLDER_CURSOR = c.fetchone()[0]
-    except Exception as e:
-        logging.error(f"Error while updating cursor. Error message: {e}")
+    else:
+        folder_cursor = db.execute(
+            f"SELECT cursor FROM cursors WHERE folder IS '{APP_PATH}'"
+        ).fetchone()[0]
 
-    app = Flask(__name__)
-    logging.info("App initialised successfully")
+    load_dotenv() # reload env after setting refresh and access tokens
 
-    @app.route("/webhook", methods=["GET"])
-    def verify():
-        logging.info("Webhook verification request received!")
-        """Respond to the webhook verification (GET request) by echoing back the challenge parameter."""
+    return jsonify(data), 200
 
-        resp = Response(request.args.get("challenge"))
-        resp.headers["Content-Type"] = "text/plain"
-        resp.headers["X-Content-Type-Options"] = "nosniff"
 
-        return resp
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    logging.info(f"Webhook activated!")
 
-    @app.route("/webhook", methods=["POST"])
-    def webhook():
-        logging.info(f"Webhook activated!")
+    folder_cursor = db.execute(f"SELECT cursor FROM cursors WHERE folder is '{APP_PATH}'").fetchone()[0]
+    logging.debug(f"Folder cursor in webhook is: {folder_cursor}")
 
-        try:
-            signature = request.headers.get("X-Dropbox-Signature")
-            logging.debug(f"Request signature: {signature}")
-            if not hmac.compare_digest(
-                signature,
-                hmac.new(
-                    bytes(os.getenv("DROPBOX_APP_SECRET"), "utf-8"),
-                    request.data,
-                    sha256,
-                ).hexdigest(),
-            ):
-                logging.warn(
-                    "Failed to verify Dropbox signature! Returning status 403..."
-                )
-                return Response(status=403)
-        except:
-            logging.error("Signature missing from request! Returning status 403...")
+    # Verify Dropbox signature
+    try:
+        signature = request.headers.get("X-Dropbox-Signature")
+        logging.debug(f"Request signature: {signature}")
+        if not hmac.compare_digest(
+            signature,
+            hmac.new(
+                bytes(os.getenv("DROPBOX_APP_SECRET"), "utf-8"),
+                request.data,
+                sha256,
+            ).hexdigest(),
+        ):
+            logging.warn("Failed to verify Dropbox signature! Returning status 403...")
             return Response(status=403)
+    except:
+        logging.error("Signature missing from request! Returning status 403...")
+        return Response(status=403)
 
-        logging.debug(f"Request signature {signature} successfully verified!")
+    logging.debug(f"Request signature {signature} successfully verified!")
 
-        changes = check_for_updates(FOLDER_CURSOR, conn, c, APP_PATH, ACCESS_TOKEN)
-        files_list = changes["files_list"]
+    changes = check_for_updates(folder_cursor, db, APP_PATH)
+    token = os.getenv("DROPBOX_ACCESS_TOKEN")
+    folder_cursor = changes["cursor"]
+    files_list = changes["files_list"]
 
-        if len(files_list) != 0:
+    if len(files_list) != 0:
 
-            for file in files_list:
-                path = file["path"]
-                filename = file["filename"]
+        for file in files_list:
+            path = file["path"]
+            filename = file["filename"]
 
-                logging.info(f"Downloading file {filename} from {path}")
-                dropbox_download_file(path, f"downloads/{filename}", ACCESS_TOKEN)
-                # threading.Thread(target=dropbox_download_file, args=(path, f"downloads/{filename}", ACCESS_TOKEN)).start()
+            logging.info(f"Downloading file {filename} from {path}")
+            dropbox_download_file(path, f"downloads/{filename}", token)
 
-                logging.debug(f"Zipping file {filename}...")
-                zip_file(f"./downloads/{filename}", f"./zips/{filename}.zip")
-                # threading.Thread(target=zipfile, args=(f"./downloads/{filename}", f"./zips/{filename}.zip")).start()
+            logging.debug(f"Zipping file {filename}...")
+            zip_file(f"./downloads/{filename}", f"./zips/{filename}.zip")
 
-                logging.debug(f"Splitting file {filename}")
-                file_split(f"./zips/{filename}.zip", "./split_zips", 1 * 1024 * 1024)
+            logging.debug(f"Splitting file {filename}")
+            file_split(f"./zips/{filename}.zip", "./split_zips", 1 * 1024 * 1024)
 
-                try:
-                    for file in os.listdir("split_zips"):
-                        if (
-                            file.split(".")[0] == filename.split(".")[0]
-                            and file[0] != "."
-                        ):
-                            threading.Thread(
-                                target=send_mail,
-                                args=(
-                                    os.path.join("split_zips", file),
-                                    os.getenv("SMTP_RECEIVER"),
-                                ),
-                            ).start()
-                except Exception as e:
-                    logging.error(e)
+            try:
+                for file in os.listdir("split_zips"):
+                    if file.split(".")[0] == filename.split(".")[0] and file[0] != ".":
+                        threading.Thread(
+                            target=send_mail,
+                            args=(
+                                os.path.join("split_zips", file),
+                                os.getenv("SMTP_RECEIVER"),
+                            ),
+                        ).start()
+            except Exception as e:
+                logging.error(e)
 
-        logging.info("Sending response to webhook!")
-        return Response(status=200)
+    logging.info("Sending response to webhook!")
+    return Response(status=200)
 
-    if __name__ == "__main__":
-        logging.warning("You should not be running the script directly! (Use gunicorn)")
-        app.run(host="0.0.0.0", debug=True)
 
-except Exception as e:
-    logging.critical(f"App failed to initialise. Error message: {e}")
-    raise SystemExit
+if __name__ == "__main__":
+    logging.warning("You should not be running the script directly! (Use gunicorn)")
+    app.run(host="0.0.0.0", debug=True)
