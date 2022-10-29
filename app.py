@@ -1,13 +1,10 @@
 from flask import Flask, Response, request, jsonify
-import requests
-from dotenv import load_dotenv, set_key
 from utils import (
     get_folder_cursor,
     dropbox_download_file,
     zip_file,
     file_split,
-    check_for_updates,
-    validate_access_token,
+    check_for_updates
 )
 import sqlite3
 import os
@@ -18,14 +15,16 @@ import logging
 import sys
 from hashlib import sha256
 import hmac
+import auth
 
 logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] %(message)s",
-    level=logging.INFO,
+    level=logging.DEBUG,
     handlers=[logging.FileHandler("logs/app.log"), logging.StreamHandler(sys.stdout)],
 )
 
 logging.info("Starting app newspaper-splitter...")
+
 
 APP_PATH = os.getenv("DROPBOX_FOLDER_PATH")
 AUTH_URL = f"https://www.dropbox.com/oauth2/authorize?client_id={os.getenv('DROPBOX_APP_KEY')}&token_access_type=offline&response_type=code&redirect_uri={'https://seklerek.ddns.net/authorise'}"
@@ -35,6 +34,7 @@ access_token = None
 # Database connection and tables setup
 logging.debug("Connecting to database...")
 db = sqlite3.connect("store.db")
+
 with db:
     db.execute(
         """CREATE TABLE IF NOT EXISTS cursors (
@@ -52,22 +52,12 @@ with db:
     )
 logging.debug("Database tables set up successfully!")
 
-# Initial setup steps
-try:
-    logging.debug("Loading configuration from .env file...")
-    load_dotenv()
-    logging.debug("Loading access token from .env file...")
-    access_token = os.getenv("DROPBOX_ACCESS_TOKEN")
-    logging.debug(f"Access token loaded from .env: {access_token[-10:-1]}")
-except Exception as e:
-    logging.error("There was an issue loading configuration from the .env file!")
+auth = auth.AuthProvider(db)
 
 # Initialise app only if refresh token is available
-if os.getenv("DROPBOX_REFRESH_TOKEN") and os.getenv("DROPBOX_ACCESS_TOKEN"):
+if auth.initialised:
+    logging.info(f"Auth provider initialised succesfully!")
     try:
-        # Initialise access token and save it to database
-        validate_access_token(db)
-
         # Retrieve Dropbox folder cursor or get a new one if missing
         cursors_in_database = db.execute(
             f"SELECT * FROM cursors WHERE folder='{APP_PATH}'"
@@ -76,7 +66,7 @@ if os.getenv("DROPBOX_REFRESH_TOKEN") and os.getenv("DROPBOX_ACCESS_TOKEN"):
 
         if not cursors_in_database:
             logging.debug("No cursors found in database! Retrieving fresh cursor...")
-            folder_cursor = get_folder_cursor(APP_PATH)["cursor"]
+            folder_cursor = get_folder_cursor(APP_PATH, auth.access_token)["cursor"]
             logging.debug(f"Response from get_folder_cursor: {folder_cursor}")
             logging.debug(f"Folder cursor for {APP_PATH} is {folder_cursor}")
             with db:
@@ -93,11 +83,8 @@ if os.getenv("DROPBOX_REFRESH_TOKEN") and os.getenv("DROPBOX_ACCESS_TOKEN"):
         logging.info("App initialised successfully")
 
     except Exception as e:
-        logging.critical(f"App failed to initialise. Error message: {e}")
-        raise SystemExit
-else:
-    logging.critical("Either or both tokens are missing from .env! The app will not work until reauthorised.")
-    logging.critical(f"Go to this URL to authorise:\n{AUTH_URL}")
+        logging.error(f"Error while fetching cursor: {e}")
+
 
 logging.info("Starting Flask app and listening for events...")
 app = Flask(__name__)
@@ -118,51 +105,39 @@ def verify():
 @app.route("/authorise", methods=["GET"])
 def authorise():
     logging.debug("Authorisation request received!")
-    query = request.args
+    code = request.args.get("code")
 
-    logging.debug(f"Request args are: {query}")
+    auth.update_refresh_token(code)
 
-    refresh_token_response = requests.post(
-        "https://api.dropboxapi.com/oauth2/token",
-        params={
-            "code": request.args.get("code"),
-            "grant_type": "authorization_code",
-            "redirect_uri": "https://seklerek.ddns.net/authorise",
-        },
-        auth=(os.getenv("DROPBOX_APP_KEY"), os.getenv("DROPBOX_APP_SECRET")),
-    )
+    try:
+        # Retrieve Dropbox folder cursor or get a new one if missing
+        cursors_in_database = db.execute(
+            f"SELECT * FROM cursors WHERE folder='{APP_PATH}'"
+        ).fetchall()
+        logging.debug(f"Cursors in database: {cursors_in_database}")
 
-    logging.debug(f"Response returned from refresh token request: {refresh_token_response.json()}")
+        if not cursors_in_database:
+            logging.debug("No cursors found in database! Retrieving fresh cursor...")
+            folder_cursor = get_folder_cursor(APP_PATH, auth.access_token)["cursor"]
+            logging.debug(f"Response from get_folder_cursor: {folder_cursor}")
+            logging.debug(f"Folder cursor for {APP_PATH} is {folder_cursor}")
+            with db:
+                db.execute(
+                    f"INSERT INTO cursors VALUES (?,?,?)",
+                    (APP_PATH, folder_cursor, time.time()),
+                )
+        else:
+            folder_cursor = db.execute(
+                f"SELECT cursor FROM cursors WHERE folder IS '{APP_PATH}'"
+            ).fetchone()[0]
 
-    logging.debug(f"Setting .env refresh token to {refresh_token_response.json()['refresh_token']}")
-    set_key(".env", "DROPBOX_REFRESH_TOKEN", refresh_token_response.json()["refresh_token"])
+        # If none of the above throw an exception on startup, then the app is ready to go
+        logging.info("App initialised successfully")
 
-    validate_access_token(db, refresh_token_response=refresh_token_response.json())
+    except Exception as e:
+        logging.error(f"Error while fetching cursor: {e}")
 
     data = {"message": "Re-authorisation successful. You can close this tab."}
-
-    # Retrieve Dropbox folder cursor or get a new one if missing
-    cursors_in_database = db.execute(
-        f"SELECT * FROM cursors WHERE folder='{APP_PATH}'"
-    ).fetchall()
-    logging.debug(f"Cursors in database: {cursors_in_database}")
-
-    if not cursors_in_database:
-        logging.debug("No cursors found in database! Retrieving fresh cursor...")
-        folder_cursor = get_folder_cursor(APP_PATH)["cursor"]
-        logging.debug(f"Response from get_folder_cursor: {folder_cursor}")
-        logging.debug(f"Folder cursor for {APP_PATH} is {folder_cursor}")
-        with db:
-            db.execute(
-                f"INSERT INTO cursors VALUES (?,?,?)",
-                (APP_PATH, folder_cursor, time.time()),
-            )
-    else:
-        folder_cursor = db.execute(
-            f"SELECT cursor FROM cursors WHERE folder IS '{APP_PATH}'"
-        ).fetchone()[0]
-
-    load_dotenv() # reload env after setting refresh and access tokens
 
     return jsonify(data), 200
 
@@ -192,10 +167,12 @@ def webhook():
         logging.error("Signature missing from request! Returning status 403...")
         return Response(status=403)
 
+    if not auth.validate_token():
+        return Response(status=403)
+
     logging.debug(f"Request signature {signature} successfully verified!")
 
-    changes = check_for_updates(folder_cursor, db, APP_PATH)
-    token = os.getenv("DROPBOX_ACCESS_TOKEN")
+    changes = check_for_updates(folder_cursor, db, APP_PATH, auth.access_token)
     folder_cursor = changes["cursor"]
     files_list = changes["files_list"]
 
@@ -206,7 +183,7 @@ def webhook():
             filename = file["filename"]
 
             logging.info(f"Downloading file {filename} from {path}")
-            dropbox_download_file(path, f"downloads/{filename}", token)
+            dropbox_download_file(path, f"downloads/{filename}", auth.access_token)
 
             logging.debug(f"Zipping file {filename}...")
             zip_file(f"./downloads/{filename}", f"./zips/{filename}.zip")
