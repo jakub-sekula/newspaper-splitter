@@ -1,14 +1,13 @@
 from flask import Flask, Response, request, jsonify
 from utils import (
-    get_folder_cursor,
     dropbox_download_file,
+    update_folder_cursor,
     zip_file,
-    file_split,
+    split_file,
     check_for_updates
 )
 import sqlite3
 import os
-import time
 from mailer import send_mail
 import threading
 import logging
@@ -17,22 +16,19 @@ from hashlib import sha256
 import hmac
 import auth
 
+logger = logging.getLogger(__name__)
 logging.basicConfig(
-    format="[%(asctime)s] [%(levelname)s] %(message)s",
-    level=logging.DEBUG,
+    format="[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
+    level=logging.INFO,
     handlers=[logging.FileHandler("logs/app.log"), logging.StreamHandler(sys.stdout)],
 )
-
-logging.info("Starting app newspaper-splitter...")
-
+logger.info("Starting app newspaper-splitter...")
 
 APP_PATH = os.getenv("DROPBOX_FOLDER_PATH")
-AUTH_URL = f"https://www.dropbox.com/oauth2/authorize?client_id={os.getenv('DROPBOX_APP_KEY')}&token_access_type=offline&response_type=code&redirect_uri={'https://seklerek.ddns.net/authorise'}"
 folder_cursor = None
-access_token = None
 
 # Database connection and tables setup
-logging.debug("Connecting to database...")
+logger.debug("Connecting to database...")
 db = sqlite3.connect("store.db")
 
 with db:
@@ -50,51 +46,29 @@ with db:
         token_expires real
     )"""
     )
-logging.debug("Database tables set up successfully!")
 
+logger.debug("Database tables set up successfully!")
+
+# Initialise the auth object, which keeps track of tokens
 auth = auth.AuthProvider(db)
 
-# Initialise app only if refresh token is available
+# Only bother with cursor setup if auth passed internal checks
 if auth.initialised:
-    logging.info(f"Auth provider initialised succesfully!")
-    try:
-        # Retrieve Dropbox folder cursor or get a new one if missing
-        cursors_in_database = db.execute(
-            f"SELECT * FROM cursors WHERE folder='{APP_PATH}'"
-        ).fetchall()
-        logging.debug(f"Cursors in database: {cursors_in_database}")
+    logger.debug(f"Auth provider initialised succesfully!")
 
-        if not cursors_in_database:
-            logging.debug("No cursors found in database! Retrieving fresh cursor...")
-            folder_cursor = get_folder_cursor(APP_PATH, auth.access_token)["cursor"]
-            logging.debug(f"Response from get_folder_cursor: {folder_cursor}")
-            logging.debug(f"Folder cursor for {APP_PATH} is {folder_cursor}")
-            with db:
-                db.execute(
-                    f"INSERT INTO cursors VALUES (?,?,?)",
-                    (APP_PATH, folder_cursor, time.time()),
-                )
-        else:
-            folder_cursor = db.execute(
-                f"SELECT cursor FROM cursors WHERE folder IS '{APP_PATH}'"
-            ).fetchone()[0]
+    update_folder_cursor(APP_PATH,auth.access_token,db)
 
-        # If none of the above throw an exception on startup, then the app is ready to go
-        logging.info("App initialised successfully")
+    # If none of the above throw an exception on startup, then the app is ready to go
+    logger.info("App initialised successfully")
 
-    except Exception as e:
-        logging.error(f"Error while fetching cursor: {e}")
-
-
-logging.info("Starting Flask app and listening for events...")
+logger.info("Starting Flask app and listening for events...")
 app = Flask(__name__)
-
 
 @app.route("/webhook", methods=["GET"])
 def verify():
-    logging.info("Webhook verification request received!")
     """Respond to the webhook verification (GET request) by echoing back the challenge parameter."""
 
+    logger.info("Webhook verification request received!")
     resp = Response(request.args.get("challenge"))
     resp.headers["Content-Type"] = "text/plain"
     resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -104,38 +78,15 @@ def verify():
 
 @app.route("/authorise", methods=["GET"])
 def authorise():
-    logging.debug("Authorisation request received!")
-    code = request.args.get("code")
+    """Refetch the refresh and access token (needs interaction from the user)"""
 
+    logger.debug("Authorisation request received!")
+    code = request.args.get("code")
     auth.update_refresh_token(code)
 
-    try:
-        # Retrieve Dropbox folder cursor or get a new one if missing
-        cursors_in_database = db.execute(
-            f"SELECT * FROM cursors WHERE folder='{APP_PATH}'"
-        ).fetchall()
-        logging.debug(f"Cursors in database: {cursors_in_database}")
-
-        if not cursors_in_database:
-            logging.debug("No cursors found in database! Retrieving fresh cursor...")
-            folder_cursor = get_folder_cursor(APP_PATH, auth.access_token)["cursor"]
-            logging.debug(f"Response from get_folder_cursor: {folder_cursor}")
-            logging.debug(f"Folder cursor for {APP_PATH} is {folder_cursor}")
-            with db:
-                db.execute(
-                    f"INSERT INTO cursors VALUES (?,?,?)",
-                    (APP_PATH, folder_cursor, time.time()),
-                )
-        else:
-            folder_cursor = db.execute(
-                f"SELECT cursor FROM cursors WHERE folder IS '{APP_PATH}'"
-            ).fetchone()[0]
-
-        # If none of the above throw an exception on startup, then the app is ready to go
-        logging.info("App initialised successfully")
-
-    except Exception as e:
-        logging.error(f"Error while fetching cursor: {e}")
+    # When new tokens are retrieved, refresh the cursors in case they are missing
+    # and couldn't be retrieved at the start of the program
+    update_folder_cursor(APP_PATH,auth.access_token,db)
 
     data = {"message": "Re-authorisation successful. You can close this tab."}
 
@@ -144,15 +95,15 @@ def authorise():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    logging.info(f"Webhook activated!")
+    logger.info(f"Webhook activated!")
 
     folder_cursor = db.execute(f"SELECT cursor FROM cursors WHERE folder is '{APP_PATH}'").fetchone()[0]
-    logging.debug(f"Folder cursor in webhook is: {folder_cursor}")
+    logger.debug(f"Folder cursor in webhook is: {folder_cursor}")
 
     # Verify Dropbox signature
     try:
         signature = request.headers.get("X-Dropbox-Signature")
-        logging.debug(f"Request signature: {signature}")
+        logger.debug(f"Request signature: {signature}")
         if not hmac.compare_digest(
             signature,
             hmac.new(
@@ -161,53 +112,54 @@ def webhook():
                 sha256,
             ).hexdigest(),
         ):
-            logging.warn("Failed to verify Dropbox signature! Returning status 403...")
+            logger.warn("Failed to verify Dropbox signature! Returning status 403...")
             return Response(status=403)
+
+        logger.debug(f"Request signature successfully verified!")
     except:
-        logging.error("Signature missing from request! Returning status 403...")
+        logger.error("Signature missing from request! Returning status 403...")
         return Response(status=403)
 
+    # Return 403 Unauthorized if the token can't be validated
     if not auth.validate_token():
         return Response(status=403)
 
-    logging.debug(f"Request signature {signature} successfully verified!")
-
     changes = check_for_updates(folder_cursor, db, APP_PATH, auth.access_token)
+
+    if not changes:
+        logger.info("Sending response to webhook!")
+        return Response(status=200)
+
+    # Extract updated cursor and list of changed files from the update response
     folder_cursor = changes["cursor"]
     files_list = changes["files_list"]
 
-    if len(files_list) != 0:
-
+    # Download the changed files, split them, and send emails
+    if files_list:
         for file in files_list:
-            path = file["path"]
             filename = file["filename"]
+            path = file["path"]
 
-            logging.info(f"Downloading file {filename} from {path}")
             dropbox_download_file(path, f"downloads/{filename}", auth.access_token)
-
-            logging.debug(f"Zipping file {filename}...")
             zip_file(f"./downloads/{filename}", f"./zips/{filename}.zip")
+            split_file(f"./zips/{filename}.zip", "./split_zips", eval(os.getenv("MAX_FILE_SIZE")))
 
-            logging.debug(f"Splitting file {filename}")
-            file_split(f"./zips/{filename}.zip", "./split_zips", 1 * 1024 * 1024)
+        try:
+            for file in os.listdir("split_zips"):
+                if file.split(".")[0] == filename.split(".")[0] and file[0] != ".":
+                    threading.Thread(
+                        target=send_mail,
+                        args=(
+                            os.path.join("split_zips", file),
+                            os.getenv("SMTP_RECEIVER"),
+                        ),
+                    ).start()
+        except Exception as e:
+            logger.error(f"Error while sending the emails: {e}")
 
-            try:
-                for file in os.listdir("split_zips"):
-                    if file.split(".")[0] == filename.split(".")[0] and file[0] != ".":
-                        threading.Thread(
-                            target=send_mail,
-                            args=(
-                                os.path.join("split_zips", file),
-                                os.getenv("SMTP_RECEIVER"),
-                            ),
-                        ).start()
-            except Exception as e:
-                logging.error(e)
-
-    logging.info("Sending response to webhook!")
+    logger.info("Sending response to webhook!")
     return Response(status=200)
 
-
 if __name__ == "__main__":
-    logging.warning("You should not be running the script directly! (Use gunicorn)")
+    logger.warning("You should not be running the script directly! (Use gunicorn)")
     app.run(host="0.0.0.0", debug=True)
